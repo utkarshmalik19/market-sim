@@ -14,19 +14,18 @@ import java.util.Map;
 
 /**
  * Loads companies from the bundled companies.xlsx resource into the database.
- * Direct port of the Python CLI's `init` command (cmd_init in cli.py), now resource-based
- * instead of a file picker — used automatically when a new save is created.
  *
  * Expected header row in the "Companies" sheet:
- * Ticker, Company, Sector, StartingPrice, EPS, RevenueGrowth, Volatility
+ * Ticker, Company, Sector, StartingPrice, EPS, RevenueGrowth, Volatility,
+ * SharesOutstanding, AvgVolume, DividendPerShare
  */
 public class ExcelLoader {
 
-    /** Bundled under src/main/resources, packaged inside the jar. */
     private static final String RESOURCE_NAME = "/companies.xlsx";
 
     private static final List<String> REQUIRED_COLUMNS = List.of(
-            "Ticker", "Company", "Sector", "StartingPrice", "EPS", "RevenueGrowth", "Volatility");
+            "Ticker", "Company", "Sector", "StartingPrice", "EPS", "RevenueGrowth", "Volatility",
+            "SharesOutstanding", "AvgVolume", "DividendPerShare");
 
     public static int loadCompaniesFromResource(Connection conn, boolean reset) throws Exception {
         try (InputStream in = ExcelLoader.class.getResourceAsStream(RESOURCE_NAME)) {
@@ -80,6 +79,7 @@ public class ExcelLoader {
                 st.execute("DELETE FROM players");
                 st.execute("DELETE FROM holdings");
                 st.execute("DELETE FROM transactions");
+                st.execute("DELETE FROM networth_history");
             }
         }
 
@@ -88,7 +88,8 @@ public class ExcelLoader {
 
         try (PreparedStatement ps = conn.prepareStatement(
                 "INSERT INTO companies (ticker, name, sector, price, prev_price, eps, " +
-                        "revenue_growth, volatility) VALUES (?, ?, ?, ?, ?, ?, ?, ?)")) {
+                        "revenue_growth, volatility, shares_outstanding, avg_volume, volume, dividend_per_share) " +
+                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")) {
 
             for (int r = sheet.getFirstRowNum() + 1; r <= sheet.getLastRowNum(); r++) {
                 Row row = sheet.getRow(r);
@@ -103,6 +104,9 @@ public class ExcelLoader {
                 double eps = numericValue(row, colIndex.get("EPS"));
                 double revenueGrowth = numericValue(row, colIndex.get("RevenueGrowth"));
                 double volatility = numericValue(row, colIndex.get("Volatility"));
+                double sharesOutstanding = numericValue(row, colIndex.get("SharesOutstanding"));
+                double avgVolume = numericValue(row, colIndex.get("AvgVolume"));
+                double dividendPerShare = numericValue(row, colIndex.get("DividendPerShare"));
 
                 ps.setString(1, ticker);
                 ps.setString(2, name);
@@ -112,6 +116,10 @@ public class ExcelLoader {
                 ps.setDouble(6, eps);
                 ps.setDouble(7, revenueGrowth);
                 ps.setDouble(8, volatility);
+                ps.setDouble(9, sharesOutstanding);
+                ps.setDouble(10, avgVolume);
+                ps.setDouble(11, avgVolume); // day-1 volume starts at the baseline
+                ps.setDouble(12, dividendPerShare);
                 ps.executeUpdate();
                 loaded++;
             }

@@ -9,8 +9,11 @@ import model.HoldingView;
 import model.Player;
 
 import javax.swing.*;
+import javax.swing.border.EmptyBorder;
 import javax.swing.table.DefaultTableModel;
 import java.awt.*;
+import java.awt.event.MouseAdapter;
+import java.awt.event.MouseEvent;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
@@ -26,6 +29,13 @@ import java.util.function.Consumer;
 public class MarketSimGUI extends JFrame {
 
     private static final DateTimeFormatter DATE_FMT = DateTimeFormatter.ofPattern("EEE, MMM d, yyyy");
+    private static final Color BUY_COLOR = new Color(0x1E8E3E);
+    private static final Color SELL_COLOR = new Color(0xC5221F);
+    private static final Color NEXT_DAY_COLOR = new Color(0x1E5AA8);
+    private static final Color POSITIVE = new Color(0x1E8E3E);
+    private static final Color NEGATIVE = new Color(0xC5221F);
+    private static final Color CARD_BORDER = new Color(0xD9DEE4);
+    private static final Color MUTED = new Color(0x777777);
 
     private final Connection conn;
     private final String saveName;
@@ -33,25 +43,26 @@ public class MarketSimGUI extends JFrame {
 
     private JComboBox<String> playerCombo;
     private JLabel dayLabel;
-    private JLabel playerLabel;
+    private JLabel welcomeLabel;
 
     private DefaultTableModel marketModel;
     private JTable marketTable;
     private JLabel selectedLabel;
-    private JLabel companyInfoLabel;
+    private JLabel sectorValueLabel;
     private JTextField qtyField;
 
     private JLabel cashLabel, valueLabel, networthLabel, pnlLabel, dayChangeLabel;
     private DefaultTableModel portfolioModel;
     private JTable portfolioTable;
+    private LineChartPanel netWorthChart;
 
-    private JTextArea newsArea;
+    private JPanel newsListPanel;
 
     private DefaultTableModel leaderboardModel;
     private JTable leaderboardTable;
 
     private static final String[] MARKET_COLUMNS = {
-            "Ticker", "Company", "Sector", "Price", "Prev", "Day Change", "Day %", "EPS", "Revenue Growth", "Volatility"
+            "Ticker", "Company", "Sector", "Price", "Prev", "Day $", "Day %", "Market Cap", "Volume", "P/E"
     };
     private static final String[] PORTFOLIO_COLUMNS = {
             "Ticker", "Company", "Qty", "Avg Cost", "Price", "Value", "P&L", "Total %", "Day $", "Day %"
@@ -68,8 +79,8 @@ public class MarketSimGUI extends JFrame {
             conn.commit();
         }
 
-        setSize(1250, 750);
-        setMinimumSize(new Dimension(1050, 650));
+        setSize(1300, 800);
+        setMinimumSize(new Dimension(1080, 680));
         setDefaultCloseOperation(JFrame.DO_NOTHING_ON_CLOSE);
         addWindowListener(new java.awt.event.WindowAdapter() {
             @Override
@@ -84,7 +95,6 @@ public class MarketSimGUI extends JFrame {
         refresh();
     }
 
-    /** Safety net: a directly-loaded old save with no companies still gets a market. */
     private void autoLoadCompaniesIfEmpty() {
         try (Statement st = conn.createStatement();
              ResultSet rs = st.executeQuery("SELECT COUNT(*) AS n FROM companies")) {
@@ -133,7 +143,6 @@ public class MarketSimGUI extends JFrame {
         setJMenuBar(menuBar);
     }
 
-    /** Closes this save and hands off to a fresh WelcomeScreen, optionally jumping to a card. */
     private void returnToMenu(Consumer<WelcomeScreen> afterShow) {
         int confirm = JOptionPane.showConfirmDialog(this,
                 "Leave this game and return to the menu? Your progress is saved automatically.",
@@ -201,12 +210,14 @@ public class MarketSimGUI extends JFrame {
         title.setFont(new Font("SansSerif", Font.BOLD, 22));
         header.add(title, BorderLayout.WEST);
 
-        JPanel rightHeader = new JPanel(new FlowLayout(FlowLayout.RIGHT));
-        playerLabel = new JLabel("");
+        welcomeLabel = new JLabel("", SwingConstants.CENTER);
+        welcomeLabel.setFont(new Font("SansSerif", Font.PLAIN, 15));
+        welcomeLabel.setForeground(new Color(0x444444));
+        header.add(welcomeLabel, BorderLayout.CENTER);
+
         dayLabel = new JLabel("Day: —");
-        rightHeader.add(playerLabel);
-        rightHeader.add(dayLabel);
-        header.add(rightHeader, BorderLayout.EAST);
+        dayLabel.setFont(new Font("SansSerif", Font.PLAIN, 14));
+        header.add(dayLabel, BorderLayout.EAST);
 
         add(header, BorderLayout.NORTH);
 
@@ -238,7 +249,7 @@ public class MarketSimGUI extends JFrame {
         JPanel rightTop = new JPanel(new FlowLayout(FlowLayout.RIGHT));
         JButton refreshBtn = new JButton("Refresh");
         refreshBtn.addActionListener(e -> refresh());
-        JButton nextDayBtn = new JButton("Next Day");
+        JButton nextDayBtn = coloredButton("Next Day", NEXT_DAY_COLOR);
         nextDayBtn.addActionListener(e -> advanceDay());
         rightTop.add(refreshBtn);
         rightTop.add(nextDayBtn);
@@ -249,38 +260,98 @@ public class MarketSimGUI extends JFrame {
         marketModel = nonEditableModel(MARKET_COLUMNS);
         marketTable = new JTable(marketModel);
         marketTable.setRowHeight(28);
+        marketTable.getTableHeader().setFont(new Font("SansSerif", Font.BOLD, 12));
         marketTable.setSelectionMode(javax.swing.ListSelectionModel.SINGLE_SELECTION);
+        marketTable.getColumnModel().getColumn(5).setCellRenderer(new SignedValueRenderer());
+        marketTable.getColumnModel().getColumn(6).setCellRenderer(new SignedValueRenderer());
         marketTable.getSelectionModel().addListSelectionListener(e -> {
             if (!e.getValueIsAdjusting()) {
                 stockSelected();
             }
         });
+        marketTable.addMouseListener(new MouseAdapter() {
+            @Override
+            public void mouseClicked(MouseEvent e) {
+                if (e.getClickCount() == 2) {
+                    openStockDetails();
+                }
+            }
+        });
         panel.add(new JScrollPane(marketTable), BorderLayout.CENTER);
 
-        JPanel trade = new JPanel(new FlowLayout(FlowLayout.LEFT, 10, 10));
+        panel.add(buildTradePanel(), BorderLayout.SOUTH);
+        return panel;
+    }
+
+    private JPanel buildTradePanel() {
+        JPanel trade = new JPanel(new BorderLayout(20, 0));
         trade.setBorder(BorderFactory.createTitledBorder("Trade"));
 
+        JPanel infoBlock = new JPanel();
+        infoBlock.setLayout(new BoxLayout(infoBlock, BoxLayout.Y_AXIS));
+        infoBlock.setBorder(new EmptyBorder(4, 4, 4, 4));
+
         selectedLabel = new JLabel("Select a stock");
-        selectedLabel.setFont(new Font("SansSerif", Font.BOLD, 12));
-        trade.add(selectedLabel);
+        selectedLabel.setFont(new Font("SansSerif", Font.BOLD, 14));
+        selectedLabel.setAlignmentX(Component.LEFT_ALIGNMENT);
 
-        trade.add(new JLabel("      Quantity:"));
+        JPanel sectorRow = new JPanel(new GridLayout(1, 2, 14, 0));
+        sectorRow.setAlignmentX(Component.LEFT_ALIGNMENT);
+        sectorRow.setBorder(new EmptyBorder(6, 0, 6, 0));
+        JLabel sectorHeading = new JLabel("Sector");
+        sectorHeading.setFont(new Font("SansSerif", Font.BOLD, 12));
+        sectorHeading.setForeground(MUTED);
+        sectorValueLabel = new JLabel("—");
+        sectorValueLabel.setFont(new Font("SansSerif", Font.PLAIN, 13));
+        sectorRow.add(sectorHeading);
+        sectorRow.add(sectorValueLabel);
+
+        JButton detailsBtn = new JButton("View Full Details \u2192");
+        detailsBtn.setAlignmentX(Component.LEFT_ALIGNMENT);
+        detailsBtn.addActionListener(e -> openStockDetails());
+
+        infoBlock.add(selectedLabel);
+        infoBlock.add(sectorRow);
+        infoBlock.add(detailsBtn);
+        trade.add(infoBlock, BorderLayout.WEST);
+
+        JPanel tradeControls = new JPanel(new FlowLayout(FlowLayout.RIGHT, 10, 10));
+        tradeControls.add(new JLabel("Quantity:"));
         qtyField = new JTextField("1", 6);
-        trade.add(qtyField);
+        tradeControls.add(qtyField);
 
-        JButton buyBtn = new JButton("BUY");
+        JButton buyBtn = coloredButton("BUY", BUY_COLOR);
         buyBtn.addActionListener(e -> executeTrade("buy"));
-        JButton sellBtn = new JButton("SELL");
+        JButton sellBtn = coloredButton("SELL", SELL_COLOR);
         sellBtn.addActionListener(e -> executeTrade("sell"));
-        trade.add(buyBtn);
-        trade.add(sellBtn);
+        tradeControls.add(buyBtn);
+        tradeControls.add(sellBtn);
 
-        companyInfoLabel = new JLabel("");
-        trade.add(Box.createHorizontalStrut(30));
-        trade.add(companyInfoLabel);
+        trade.add(tradeControls, BorderLayout.EAST);
+        return trade;
+    }
 
-        panel.add(trade, BorderLayout.SOUTH);
-        return panel;
+    private JButton coloredButton(String text, Color color) {
+        JButton btn = new JButton(text);
+        btn.setBackground(color);
+        btn.setForeground(Color.WHITE);
+        btn.setOpaque(true);
+        btn.setFocusPainted(false);
+        btn.setBorderPainted(false);
+        btn.setFont(new Font("SansSerif", Font.BOLD, 12));
+        return btn;
+    }
+
+    private void openStockDetails() {
+        if (selectedTicker == null) {
+            Dialogs.showError(this, "No Stock Selected", "Select a stock first.");
+            return;
+        }
+        try {
+            new StockDetailDialog(this, conn, selectedTicker).setVisible(true);
+        } catch (SQLException e) {
+            Dialogs.showError(this, "Database Error", e.getMessage());
+        }
     }
 
     // ---------------------------------------------------------
@@ -291,37 +362,60 @@ public class MarketSimGUI extends JFrame {
         JPanel panel = new JPanel(new BorderLayout(0, 15));
         panel.setBorder(BorderFactory.createEmptyBorder(15, 15, 15, 15));
 
-        JPanel summary = new JPanel(new GridLayout(1, 5, 10, 0));
-        cashLabel = addMetric(summary, "Cash");
-        valueLabel = addMetric(summary, "Portfolio Value");
-        networthLabel = addMetric(summary, "Net Worth");
-        pnlLabel = addMetric(summary, "Total P&L");
-        dayChangeLabel = addMetric(summary, "Day Change");
+        JPanel summary = new JPanel(new GridLayout(1, 5, 12, 0));
+        cashLabel = addWidget(summary, "Cash");
+        valueLabel = addWidget(summary, "Portfolio Value");
+        networthLabel = addWidget(summary, "Net Worth");
+        pnlLabel = addWidget(summary, "Total P&L");
+        dayChangeLabel = addWidget(summary, "Day Change");
         panel.add(summary, BorderLayout.NORTH);
 
         portfolioModel = nonEditableModel(PORTFOLIO_COLUMNS);
         portfolioTable = new JTable(portfolioModel);
         portfolioTable.setRowHeight(28);
-        panel.add(new JScrollPane(portfolioTable), BorderLayout.CENTER);
+        portfolioTable.getTableHeader().setFont(new Font("SansSerif", Font.BOLD, 12));
+        for (int col : new int[]{6, 7, 8, 9}) {
+            portfolioTable.getColumnModel().getColumn(col).setCellRenderer(new SignedValueRenderer());
+        }
+
+        RoundedPanel chartCard = new RoundedPanel(10, Color.WHITE, CARD_BORDER);
+        chartCard.setLayout(new BorderLayout());
+        chartCard.setBorder(new EmptyBorder(10, 14, 10, 14));
+        JLabel chartTitle = new JLabel("Net Worth Over Time");
+        chartTitle.setFont(new Font("SansSerif", Font.BOLD, 13));
+        chartTitle.setBorder(new EmptyBorder(0, 0, 6, 0));
+        chartCard.add(chartTitle, BorderLayout.NORTH);
+        netWorthChart = new LineChartPanel();
+        netWorthChart.setPreferredSize(new Dimension(0, 170));
+        netWorthChart.setEmptyMessage("Advance a couple of days to see the trend");
+        chartCard.add(netWorthChart, BorderLayout.CENTER);
+
+        JPanel centerWrap = new JPanel(new BorderLayout(0, 12));
+        centerWrap.add(new JScrollPane(portfolioTable), BorderLayout.CENTER);
+        centerWrap.add(chartCard, BorderLayout.SOUTH);
+        panel.add(centerWrap, BorderLayout.CENTER);
 
         return panel;
     }
 
-    private JLabel addMetric(JPanel parent, String title) {
-        JPanel box = new JPanel();
-        box.setLayout(new BoxLayout(box, BoxLayout.Y_AXIS));
-        box.setBorder(BorderFactory.createEmptyBorder(10, 10, 10, 10));
+    private JLabel addWidget(JPanel parent, String title) {
+        RoundedPanel card = new RoundedPanel(10, Color.WHITE, CARD_BORDER);
+        card.setLayout(new BoxLayout(card, BoxLayout.Y_AXIS));
+        card.setBorder(new EmptyBorder(12, 14, 12, 14));
 
         JLabel titleLabel = new JLabel(title);
+        titleLabel.setFont(new Font("SansSerif", Font.PLAIN, 12));
+        titleLabel.setForeground(MUTED);
         titleLabel.setAlignmentX(Component.CENTER_ALIGNMENT);
 
         JLabel valueLbl = new JLabel("$0.00");
-        valueLbl.setFont(new Font("SansSerif", Font.BOLD, 14));
+        valueLbl.setFont(new Font("SansSerif", Font.BOLD, 16));
         valueLbl.setAlignmentX(Component.CENTER_ALIGNMENT);
 
-        box.add(titleLabel);
-        box.add(valueLbl);
-        parent.add(box);
+        card.add(titleLabel);
+        card.add(Box.createVerticalStrut(6));
+        card.add(valueLbl);
+        parent.add(card);
         return valueLbl;
     }
 
@@ -332,12 +426,17 @@ public class MarketSimGUI extends JFrame {
     private JPanel buildNewsTab() {
         JPanel panel = new JPanel(new BorderLayout());
         panel.setBorder(BorderFactory.createEmptyBorder(15, 15, 15, 15));
-        newsArea = new JTextArea();
-        newsArea.setEditable(false);
-        newsArea.setFont(new Font("Monospaced", Font.PLAIN, 13));
-        newsArea.setLineWrap(true);
-        newsArea.setWrapStyleWord(true);
-        panel.add(new JScrollPane(newsArea), BorderLayout.CENTER);
+        panel.setBackground(new Color(0xF5F7FA));
+
+        newsListPanel = new JPanel();
+        newsListPanel.setLayout(new BoxLayout(newsListPanel, BoxLayout.Y_AXIS));
+        newsListPanel.setBackground(new Color(0xF5F7FA));
+        newsListPanel.setBorder(new EmptyBorder(4, 4, 4, 4));
+
+        JScrollPane scroll = new JScrollPane(newsListPanel);
+        scroll.getVerticalScrollBar().setUnitIncrement(16);
+        scroll.setBorder(null);
+        panel.add(scroll, BorderLayout.CENTER);
         return panel;
     }
 
@@ -351,6 +450,7 @@ public class MarketSimGUI extends JFrame {
         leaderboardModel = nonEditableModel(LEADERBOARD_COLUMNS);
         leaderboardTable = new JTable(leaderboardModel);
         leaderboardTable.setRowHeight(28);
+        leaderboardTable.getTableHeader().setFont(new Font("SansSerif", Font.BOLD, 12));
         panel.add(new JScrollPane(leaderboardTable), BorderLayout.CENTER);
         return panel;
     }
@@ -378,7 +478,7 @@ public class MarketSimGUI extends JFrame {
 
             dayLabel.setText("Day: " + Db.getCurrentDate(conn).format(DATE_FMT));
             String player = (String) playerCombo.getSelectedItem();
-            playerLabel.setText(player != null ? "Player: " + player : "");
+            welcomeLabel.setText(player != null ? "Welcome, " + player : "");
         } catch (SQLException e) {
             Dialogs.showError(this, "Database Error", e.getMessage());
         }
@@ -411,10 +511,10 @@ public class MarketSimGUI extends JFrame {
             double changePct = c.getPrevPrice() != 0 ? change / c.getPrevPrice() * 100 : 0;
             marketModel.addRow(new Object[]{
                     c.getTicker(), c.getName(), c.getSector(),
-                    money(c.getPrice()), money(c.getPrevPrice()),
-                    String.format("%+,.2f", change), String.format("%+.2f%%", changePct),
-                    String.format("%.2f", c.getEps()), String.format("%.2f%%", c.getRevenueGrowth() * 100),
-                    String.format("%.2f%%", c.getVolatility() * 100)
+                    Formatters.money(c.getPrice()), Formatters.money(c.getPrevPrice()),
+                    String.format("%+,.2f", change), Formatters.signedPercent(changePct / 100),
+                    Formatters.marketCap(c.getMarketCap()), Formatters.volume(c.getVolume()),
+                    Formatters.peRatio(c.getEps(), c.getPrice())
             });
         }
     }
@@ -430,10 +530,8 @@ public class MarketSimGUI extends JFrame {
             if (c == null) {
                 return;
             }
-            selectedLabel.setText(c.getTicker() + " — " + c.getName() + " @ " + money(c.getPrice()));
-            companyInfoLabel.setText(String.format(
-                    "Sector: %s    EPS: $%.2f    Revenue Growth: %.1f%%    Volatility: %.1f%%",
-                    c.getSector(), c.getEps(), c.getRevenueGrowth() * 100, c.getVolatility() * 100));
+            selectedLabel.setText(c.getTicker() + " — " + c.getName() + " @ " + Formatters.money(c.getPrice()));
+            sectorValueLabel.setText(c.getSector());
         } catch (SQLException e) {
             Dialogs.showError(this, "Database Error", e.getMessage());
         }
@@ -500,6 +598,7 @@ public class MarketSimGUI extends JFrame {
             networthLabel.setText("$0.00");
             pnlLabel.setText("$0.00");
             dayChangeLabel.setText("$0.00");
+            netWorthChart.setData(List.of(), POSITIVE);
             return;
         }
 
@@ -527,29 +626,51 @@ public class MarketSimGUI extends JFrame {
 
             portfolioModel.addRow(new Object[]{
                     h.getTicker(), h.getName(), h.getQty(),
-                    money(h.getAvgCost()), money(h.getPrice()), money(value),
-                    String.format("$%+,.2f", pnl), String.format("%+.2f%%", pnlPct),
-                    String.format("$%+,.2f", holdingDayChange), String.format("%+.2f%%", dayPct)
+                    Formatters.money(h.getAvgCost()), Formatters.money(h.getPrice()), Formatters.money(value),
+                    Formatters.signedMoney(pnl), Formatters.signedPercent(pnlPct / 100),
+                    Formatters.signedMoney(holdingDayChange), Formatters.signedPercent(dayPct / 100)
             });
         }
 
         double netWorth = p.getCash() + portfolioValue;
-        cashLabel.setText(money(p.getCash()));
-        valueLabel.setText(money(portfolioValue));
-        networthLabel.setText(money(netWorth));
-        pnlLabel.setText(String.format("$%+,.2f", totalPnl));
-        dayChangeLabel.setText(String.format("$%+,.2f", dayChange));
+        cashLabel.setText(Formatters.money(p.getCash()));
+        valueLabel.setText(Formatters.money(portfolioValue));
+        networthLabel.setText(Formatters.money(netWorth));
+        pnlLabel.setText(Formatters.signedMoney(totalPnl));
+        pnlLabel.setForeground(totalPnl >= 0 ? POSITIVE : NEGATIVE);
+        dayChangeLabel.setText(Formatters.signedMoney(dayChange));
+        dayChangeLabel.setForeground(dayChange >= 0 ? POSITIVE : NEGATIVE);
+
+        List<double[]> history = Db.getNetWorthHistory(conn, player);
+        List<LineChartPanel.Point> points = new ArrayList<>();
+        for (double[] pair : history) {
+            points.add(new LineChartPanel.Point(pair[0], pair[1]));
+        }
+        boolean trendingUp = points.size() < 2 || points.get(points.size() - 1).y() >= points.get(0).y();
+        netWorthChart.setData(points, trendingUp ? POSITIVE : NEGATIVE);
     }
 
     private void refreshNews() throws SQLException {
-        List<EventRow> events = Db.getRecentEvents(conn, 30);
-        StringBuilder sb = new StringBuilder();
-        for (int i = events.size() - 1; i >= 0; i--) {
-            EventRow e = events.get(i);
-            sb.append("[Day ").append(e.getTick()).append("] [").append(e.getTicker())
-                    .append("] ").append(e.getHeadline()).append("\n\n");
+        newsListPanel.removeAll();
+        List<EventRow> events = Db.getRecentEvents(conn, 40);
+
+        if (events.isEmpty()) {
+            JLabel empty = new JLabel("No headlines yet — advance a day to see the market move.");
+            empty.setFont(new Font("SansSerif", Font.PLAIN, 13));
+            empty.setForeground(MUTED);
+            empty.setBorder(new EmptyBorder(20, 4, 0, 0));
+            newsListPanel.add(empty);
+        } else {
+            for (EventRow e : events) {
+                JPanel card = NewsCard.create(e);
+                card.setAlignmentX(Component.LEFT_ALIGNMENT);
+                newsListPanel.add(card);
+                newsListPanel.add(Box.createVerticalStrut(8));
+            }
         }
-        newsArea.setText(sb.toString());
+
+        newsListPanel.revalidate();
+        newsListPanel.repaint();
     }
 
     private void refreshLeaderboard() throws SQLException {
@@ -571,12 +692,8 @@ public class MarketSimGUI extends JFrame {
 
         int rank = 1;
         for (Object[] row : ranked) {
-            leaderboardModel.addRow(new Object[]{rank++, row[0], money((Double) row[1])});
+            leaderboardModel.addRow(new Object[]{rank++, row[0], Formatters.money((Double) row[1])});
         }
-    }
-
-    private static String money(double v) {
-        return String.format("$%,.2f", v);
     }
 
     // ---------------------------------------------------------

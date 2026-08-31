@@ -11,10 +11,11 @@ import java.sql.SQLException;
 import java.time.Instant;
 import java.util.*;
 
-/** Algorithmic price engine and trading logic. Direct port of market.py. */
+/** Algorithmic price/volume engine and trading logic. */
 public class Market {
 
-    private record EventTemplate(String template, double lo, double hi) {}
+    private record EventTemplate(String template, double lo, double hi) {
+    }
 
     private static final EventTemplate[] EVENTS = {
             new EventTemplate("%s beats earnings expectations", 0.03, 0.08),
@@ -29,10 +30,12 @@ public class Market {
     private static final double SECTOR_SHOCK_STDEV = 0.008;
     private static final double BASE_NOISE_FLOOR = 0.005;
     private static final double MIN_PRICE = 0.50;
+    private static final double MIN_VOLUME_FACTOR = 0.4;
+    private static final double MAX_VOLUME_FACTOR = 1.8;
 
     private static final Random RNG = new Random();
 
-    /** Advances the simulation by one tick. Returns the new tick number. */
+    /** Advances the simulation by one tick (one in-game day). Returns the new tick number. */
     public static int runTick(Connection conn) throws SQLException {
         int tickNum = Db.getTick(conn) + 1;
 
@@ -47,8 +50,8 @@ public class Market {
             sectorShock.put(sector, RNG.nextGaussian() * SECTOR_SHOCK_STDEV);
         }
 
-        try (PreparedStatement updatePrice = conn.prepareStatement(
-                "UPDATE companies SET price = ?, prev_price = ? WHERE ticker = ?");
+        try (PreparedStatement updateCompany = conn.prepareStatement(
+                "UPDATE companies SET price = ?, prev_price = ?, volume = ? WHERE ticker = ?");
              PreparedStatement insertHistory = conn.prepareStatement(
                      "INSERT INTO price_history (tick, ticker, price) VALUES (?, ?, ?)");
              PreparedStatement insertEvent = conn.prepareStatement(
@@ -64,7 +67,8 @@ public class Market {
 
                 double eventReturn = 0.0;
                 String headline = null;
-                if (RNG.nextDouble() < EVENT_CHANCE) {
+                boolean hasEvent = RNG.nextDouble() < EVENT_CHANCE;
+                if (hasEvent) {
                     EventTemplate ev = EVENTS[RNG.nextInt(EVENTS.length)];
                     eventReturn = ev.lo() + RNG.nextDouble() * (ev.hi() - ev.lo());
                     headline = String.format(ev.template(), c.getName());
@@ -73,10 +77,19 @@ public class Market {
                 double pctChange = sectorShock.get(c.getSector()) + fundamentalDrift + noise + eventReturn;
                 double newPrice = Math.max(oldPrice * (1 + pctChange), MIN_PRICE);
 
-                updatePrice.setDouble(1, newPrice);
-                updatePrice.setDouble(2, oldPrice);
-                updatePrice.setString(3, c.getTicker());
-                updatePrice.executeUpdate();
+                // Volume swings around the company's baseline; news days trade heavier.
+                double volumeFactor = MIN_VOLUME_FACTOR
+                        + RNG.nextDouble() * (MAX_VOLUME_FACTOR - MIN_VOLUME_FACTOR);
+                if (hasEvent) {
+                    volumeFactor *= 1.5;
+                }
+                double newVolume = Math.max(c.getAvgVolume() * volumeFactor, 0);
+
+                updateCompany.setDouble(1, newPrice);
+                updateCompany.setDouble(2, oldPrice);
+                updateCompany.setDouble(3, newVolume);
+                updateCompany.setString(4, c.getTicker());
+                updateCompany.executeUpdate();
 
                 insertHistory.setInt(1, tickNum);
                 insertHistory.setString(2, c.getTicker());
@@ -93,13 +106,14 @@ public class Market {
         }
 
         Db.setTick(conn, tickNum);
+        Db.recordNetWorthHistory(conn, tickNum);
         conn.commit();
         return tickNum;
     }
 
     /**
      * side must be "buy" or "sell". Throws IllegalArgumentException on any invalid
-     * trade (equivalent of the Python ValueError), with a message safe to show the user.
+     * trade, with a message safe to show the user.
      */
     public static String executeTrade(Connection conn, String player, String tickerIn, int qty, String sideIn)
             throws SQLException {

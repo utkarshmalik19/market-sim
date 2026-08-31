@@ -18,14 +18,18 @@ public class Db {
 
     private static final String[] SCHEMA = {
             "CREATE TABLE IF NOT EXISTS companies (" +
-                    "ticker          TEXT PRIMARY KEY," +
-                    "name            TEXT NOT NULL," +
-                    "sector          TEXT NOT NULL," +
-                    "price           REAL NOT NULL," +
-                    "prev_price      REAL NOT NULL," +
-                    "eps             REAL NOT NULL," +
-                    "revenue_growth  REAL NOT NULL," +
-                    "volatility      REAL NOT NULL" +
+                    "ticker              TEXT PRIMARY KEY," +
+                    "name                TEXT NOT NULL," +
+                    "sector              TEXT NOT NULL," +
+                    "price               REAL NOT NULL," +
+                    "prev_price          REAL NOT NULL," +
+                    "eps                 REAL NOT NULL," +
+                    "revenue_growth      REAL NOT NULL," +
+                    "volatility          REAL NOT NULL," +
+                    "shares_outstanding  REAL NOT NULL DEFAULT 0," +
+                    "avg_volume          REAL NOT NULL DEFAULT 0," +
+                    "volume              REAL NOT NULL DEFAULT 0," +
+                    "dividend_per_share  REAL NOT NULL DEFAULT 0" +
                     ")",
             "CREATE TABLE IF NOT EXISTS players (" +
                     "name    TEXT PRIMARY KEY," +
@@ -63,6 +67,11 @@ public class Db {
                     "key     TEXT PRIMARY KEY," +
                     "value   TEXT NOT NULL" +
                     ")",
+            "CREATE TABLE IF NOT EXISTS networth_history (" +
+                    "tick        INTEGER NOT NULL," +
+                    "player      TEXT NOT NULL," +
+                    "net_worth   REAL NOT NULL" +
+                    ")",
     };
 
     static {
@@ -73,12 +82,9 @@ public class Db {
         }
     }
 
-    /** Opens (creating if needed) the database file for the given save name. */
     public static Connection connect(String saveName) throws SQLException {
         File dbFile = SaveManager.fileFor(saveName);
         Connection conn = DriverManager.getConnection("jdbc:sqlite:" + dbFile.getAbsolutePath());
-        // Python's sqlite3 module defaults to manual commits; match that here so the
-        // explicit conn.commit() calls throughout Market/Db behave the same way.
         conn.setAutoCommit(false);
         try (Statement st = conn.createStatement()) {
             st.execute("PRAGMA foreign_keys = ON");
@@ -93,7 +99,6 @@ public class Db {
             }
         }
 
-        // Migration for databases created before prev_price existed.
         Set<String> columns = new LinkedHashSet<>();
         try (Statement st = conn.createStatement();
              ResultSet rs = st.executeQuery("PRAGMA table_info(companies)")) {
@@ -102,10 +107,24 @@ public class Db {
             }
         }
 
-        if (!columns.contains("prev_price")) {
-            try (Statement st = conn.createStatement()) {
+        // Migrations for databases created before these columns existed.
+        try (Statement st = conn.createStatement()) {
+            if (!columns.contains("prev_price")) {
                 st.execute("ALTER TABLE companies ADD COLUMN prev_price REAL NOT NULL DEFAULT 0");
                 st.execute("UPDATE companies SET prev_price = price WHERE prev_price = 0");
+            }
+            if (!columns.contains("shares_outstanding")) {
+                st.execute("ALTER TABLE companies ADD COLUMN shares_outstanding REAL NOT NULL DEFAULT 0");
+            }
+            if (!columns.contains("avg_volume")) {
+                st.execute("ALTER TABLE companies ADD COLUMN avg_volume REAL NOT NULL DEFAULT 0");
+            }
+            if (!columns.contains("volume")) {
+                st.execute("ALTER TABLE companies ADD COLUMN volume REAL NOT NULL DEFAULT 0");
+                st.execute("UPDATE companies SET volume = avg_volume WHERE volume = 0");
+            }
+            if (!columns.contains("dividend_per_share")) {
+                st.execute("ALTER TABLE companies ADD COLUMN dividend_per_share REAL NOT NULL DEFAULT 0");
             }
         }
 
@@ -132,7 +151,6 @@ public class Db {
         }
     }
 
-    /** The real-world date the save was started on. */
     public static LocalDate getStartDate(Connection conn) throws SQLException {
         try (PreparedStatement ps = conn.prepareStatement(
                 "SELECT value FROM game_state WHERE key = 'start_date'");
@@ -153,7 +171,6 @@ public class Db {
         }
     }
 
-    /** The in-game "today" — the save's start date plus one day per tick elapsed. */
     public static LocalDate getCurrentDate(Connection conn) throws SQLException {
         LocalDate start = getStartDate(conn);
         if (start == null) {
@@ -235,7 +252,6 @@ public class Db {
         return result;
     }
 
-    /** Returns null if the player doesn't exist, matching the Python None return. */
     public static Double getPlayerNetWorth(Connection conn, String player) throws SQLException {
         Player p = getPlayer(conn, player);
         if (p == null) {
@@ -248,10 +264,66 @@ public class Db {
         return p.getCash() + holdingsValue;
     }
 
+    /** Snapshots every player's current net worth against a given tick, for the portfolio chart. */
+    public static void recordNetWorthHistory(Connection conn, int tick) throws SQLException {
+        List<String> names = new ArrayList<>();
+        try (Statement st = conn.createStatement();
+             ResultSet rs = st.executeQuery("SELECT name FROM players")) {
+            while (rs.next()) {
+                names.add(rs.getString("name"));
+            }
+        }
+        try (PreparedStatement ps = conn.prepareStatement(
+                "INSERT INTO networth_history (tick, player, net_worth) VALUES (?, ?, ?)")) {
+            for (String name : names) {
+                Double nw = getPlayerNetWorth(conn, name);
+                if (nw == null) {
+                    continue;
+                }
+                ps.setInt(1, tick);
+                ps.setString(2, name);
+                ps.setDouble(3, nw);
+                ps.executeUpdate();
+            }
+        }
+    }
+
+    /** Each element is {tick, netWorth}, ordered oldest to newest. */
+    public static List<double[]> getNetWorthHistory(Connection conn, String player) throws SQLException {
+        List<double[]> result = new ArrayList<>();
+        try (PreparedStatement ps = conn.prepareStatement(
+                "SELECT tick, net_worth FROM networth_history WHERE player = ? ORDER BY tick")) {
+            ps.setString(1, player);
+            try (ResultSet rs = ps.executeQuery()) {
+                while (rs.next()) {
+                    result.add(new double[]{rs.getInt("tick"), rs.getDouble("net_worth")});
+                }
+            }
+        }
+        return result;
+    }
+
+    /** Each element is {tick, price}, ordered oldest to newest. */
+    public static List<double[]> getPriceHistory(Connection conn, String ticker) throws SQLException {
+        List<double[]> result = new ArrayList<>();
+        try (PreparedStatement ps = conn.prepareStatement(
+                "SELECT tick, price FROM price_history WHERE ticker = ? ORDER BY tick")) {
+            ps.setString(1, ticker);
+            try (ResultSet rs = ps.executeQuery()) {
+                while (rs.next()) {
+                    result.add(new double[]{rs.getInt("tick"), rs.getDouble("price")});
+                }
+            }
+        }
+        return result;
+    }
+
     private static Company mapCompany(ResultSet rs) throws SQLException {
         return new Company(
                 rs.getString("ticker"), rs.getString("name"), rs.getString("sector"),
                 rs.getDouble("price"), rs.getDouble("prev_price"), rs.getDouble("eps"),
-                rs.getDouble("revenue_growth"), rs.getDouble("volatility"));
+                rs.getDouble("revenue_growth"), rs.getDouble("volatility"),
+                rs.getDouble("shares_outstanding"), rs.getDouble("avg_volume"),
+                rs.getDouble("volume"), rs.getDouble("dividend_per_share"));
     }
 }

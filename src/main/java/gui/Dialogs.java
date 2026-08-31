@@ -18,8 +18,6 @@ public final class Dialogs {
     private static final Color SELL_COLOR = new Color(0xB05A00);
     private static final Color POSITIVE = new Color(0x1E8E3E);
     private static final Color NEGATIVE = new Color(0xC5221F);
-    private static final Color CARD_BG = new Color(0xF5F7FA);
-    private static final Color BORDER = new Color(0xD9DEE4);
     private static final DateTimeFormatter DATE_FMT = DateTimeFormatter.ofPattern("EEEE, MMM d, yyyy");
 
     private Dialogs() {
@@ -37,7 +35,7 @@ public final class Dialogs {
         content.setBackground(Color.WHITE);
 
         if (events.isEmpty()) {
-            JLabel none = new JLabel("No notable news today");
+            JLabel none = new JLabel("No notable news today — prices still moved with the market.");
             none.setFont(new Font("SansSerif", Font.PLAIN, 13));
             none.setAlignmentX(Component.LEFT_ALIGNMENT);
             content.add(none);
@@ -49,43 +47,14 @@ public final class Dialogs {
             content.add(newsTitle);
 
             for (EventRow e : events) {
-                content.add(newsCard(e));
+                JPanel card = NewsCard.create(e);
+                card.setAlignmentX(Component.LEFT_ALIGNMENT);
+                content.add(card);
                 content.add(Box.createVerticalStrut(6));
             }
         }
 
         finish(dialog, parent, content);
-    }
-
-    private static JPanel newsCard(EventRow e) {
-        boolean positive = looksPositive(e.getHeadline());
-
-        JPanel card = new JPanel(new BorderLayout(10, 0));
-        card.setBackground(CARD_BG);
-        card.setBorder(BorderFactory.createCompoundBorder(
-                BorderFactory.createLineBorder(BORDER, 1, true),
-                new EmptyBorder(8, 10, 8, 10)));
-        card.setAlignmentX(Component.LEFT_ALIGNMENT);
-        card.setMaximumSize(new Dimension(Integer.MAX_VALUE, 60));
-
-        JLabel tag = new JLabel(e.getTicker());
-        tag.setOpaque(true);
-        tag.setBackground(positive ? POSITIVE : NEGATIVE);
-        tag.setForeground(Color.WHITE);
-        tag.setFont(new Font("SansSerif", Font.BOLD, 12));
-        tag.setBorder(new EmptyBorder(4, 8, 4, 8));
-        card.add(tag, BorderLayout.WEST);
-
-        JLabel headline = new JLabel("<html>" + e.getHeadline() + "</html>");
-        headline.setFont(new Font("SansSerif", Font.PLAIN, 13));
-        card.add(headline, BorderLayout.CENTER);
-
-        return card;
-    }
-
-    private static boolean looksPositive(String headline) {
-        String h = headline.toLowerCase();
-        return h.contains("beats") || h.contains("rumor") || h.contains("unveils");
     }
 
     // ---------------------------------------------------------
@@ -114,7 +83,7 @@ public final class Dialogs {
     }
 
     // ---------------------------------------------------------
-    // SIMPLE ERROR / INFO (styled wrappers around JOptionPane for consistency)
+    // SIMPLE ERROR / INFO
     // ---------------------------------------------------------
 
     public static void showError(Component parent, String title, String message) {
@@ -161,7 +130,11 @@ public final class Dialogs {
         dialog.getRootPane().setDefaultButton(ok);
         dialog.pack();
         Dimension size = dialog.getSize();
-        dialog.setMinimumSize(new Dimension(Math.max(380, size.width), size.height));
+        dialog.setMinimumSize(new Dimension(Math.max(420, size.width), size.height));
+        dialog.setMaximumSize(new Dimension(600, 700));
+        if (dialog.getHeight() > 650) {
+            dialog.setSize(dialog.getWidth(), 650);
+        }
         dialog.setLocationRelativeTo(parent);
         dialog.setResizable(false);
         dialog.setVisible(true);
